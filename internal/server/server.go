@@ -8,6 +8,7 @@ import (
 
 	"github.com/gorilla/mux"
 
+	"ls-todo/internal/db"
 	"ls-todo/internal/models"
 )
 
@@ -65,11 +66,19 @@ type Server interface {
 // in the application.
 type server struct {
 	http.Handler
+
+	db db.PGManager
 }
 
 // New returns a new Server instance. Notice how we return the interface and not the struct.
-func New(router *mux.Router) Server {
-	server := &server{Handler: router}
+// Likewise, we use the PGManager interface instead of a pgManager struct. This allows us to
+// pass in a mock database that implements the PGManager interface for when we want to do
+// unit tests.
+func New(router *mux.Router, db db.PGManager) Server {
+	server := &server{
+		Handler: router,
+		db: db,
+	}
 	server.routes(router)
 
 	return server

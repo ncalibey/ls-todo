@@ -1,5 +1,20 @@
 version: '3.7'
 services:
+  todo-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: release
+    environment:
+      PORT: 8080
+      PG_USER: postgres
+      PG_PASSWORD: pgpass
+      PG_HOST: postgres
+      PG_DATABASE: postgres
+      PG_PORT: 5432
+      PG_SSLMODE: "disable"
+    ports:
+    - "8080:8080"
 
   postgres:
     image: postgres:12-alpine
@@ -9,14 +24,12 @@ services:
       PG_HOST: postgres
       PG_DATABASE: postgres
       PG_PORT: 5432
-      PG_SSLMODE: false
-
+      PG_SSLMODE: "false"
     ports:
       - "5432:5432"
 
   migrations:
     image: migrate/migrate
     volumes:
-      - migrations/projects:/migrations
-    command: -path=/migrations/ -database postgres://projects-admin:pgpass@postgres:5432/projects?sslmode=disable up
-
+      - ./migrations:/migrations
+    command: -path=/migrations/ -database postgres://postgres:pgpass@postgres:5432/postgres?sslmode=disable up

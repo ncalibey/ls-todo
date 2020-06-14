@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 
 	"ls-todo/internal/config"
 	"ls-todo/internal/db"
@@ -30,24 +31,31 @@ func main() {
 	connString := db.GetConnString(cfg)
 	dbConn, err := sqlx.Connect("postgres", connString)
 	if err != nil {
-		log.Fatalf("error connection to database: %v", err)
+		log.Fatalf("error connecting to database: %v", err)
 	}
 	// In order to prevent dangling open connections after our app closes, we use the `defer`
 	// keyword. This ensures that the `dbConn.Close()` method will be called before the `main`
 	// function finishes executing. It will also close the connection if there is an error that
 	// crashes our program.
 	defer dbConn.Close()
+
+	// Next we ping the database to make sure we have an established connection.
+	//
+	// By using an `if err :=`, we scope this `err` variable to the `if` block, meaning it shadows
+	// the `err` variable on L15. Though we don't need to here, it would allow us to use the
+	// previous `err` variable again after the `if` block.
+	if err := dbConn.Ping(); err != nil {
+		log.Fatalf("error pinging database: %v", err)
+	}
+	log.Println("successfully connected to database")
 	pgManager := db.New(dbConn)
 
 	s := server.New(router, pgManager)
 
-	// By using an `if err :=`, we scope this `err` variable to the `if` block, meaning it shadows
-	// the `err` variable on L15. Though we don't need to here, it would allow us to use the
-	// previous `err` variable again after the `if` block.
-	//
 	// Since our server instance implements the `http.Handler` interface (because of our router), we
 	// cann use it as the second argument to `http.ListenAndServe`. This makes Go use our router for
 	// routing instead of the default router of the net/http package.
+	log.Printf("listening on port %d\n", cfg.Port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.Port), s); err != nil {
 		log.Fatalf("error starting HTTP server: %v", err)
 	}

@@ -11,7 +11,7 @@ package models
 // specify different names if we want to (e.g. if the completed column in the db was "done" we
 // could do `db:"done"` for the `Completed` field).
 type Todo struct {
-	ID          int64  `json:"id" db:"id"`
+	ID          int64          `json:"id" db:"id"`
 	Title       string `json:"title" db:"title"`
 	Day         string `json:"day" db:"day"`
 	Month       string `json:"month" db:"month"`

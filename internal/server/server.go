@@ -4,45 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"sync"
 
 	"github.com/gorilla/mux"
 
 	"ls-todo/internal/db"
 	"ls-todo/internal/models"
 )
-
-// data is an in-memory "store" that holds all the todos on the main. It uses
-// a mutex to ensure saftey accessing the data between threads.
-type data struct {
-	todos []*models.Todo
-	mu    *sync.Mutex
-	nextID int64
-}
-
-var appData = &data{
-	nextID: 4,
-	todos: []*models.Todo{
-		{
-			ID: 1,
-			Title:     "Todo 1",
-			Completed: false,
-		},
-		{
-			ID: 2,
-			Title: "Todo 2",
-			Month: "01",
-			Day:   "01",
-			Year:  "2018",
-		},
-		{
-			ID: 3,
-			Title:     "Todo 3",
-			Completed: false,
-		},
-	},
-	mu: &sync.Mutex{},
-}
 
 // Server is the HTTP main that handles requests.
 type Server interface {
@@ -75,15 +42,19 @@ type server struct {
 // pass in a mock database that implements the PGManager interface for when we want to do
 // unit tests.
 func New(router *mux.Router, db db.PGManager) Server {
+	// This creates a new *server struct instance. Notice the pointer (&): this means when
+	// the server is returned it will be the same place in memory when used elsewhere (i.e.
+	// the struct isn't copied).
 	server := &server{
 		Handler: router,
-		db: db,
+		db:      db,
 	}
+	// We set up our routes as part of the constructor function.
 	server.routes(router)
-
 	return server
 }
 
+// routes attaches all of the handler functions for the api paths that we need to handle.
 func (s *server) routes(router *mux.Router) {
 	router.HandleFunc("/api/todos", s.HandleGetTodos).Methods("GET")
 	router.HandleFunc("/api/todos/{id}", s.HandleGetTodo).Methods("GET")
@@ -94,32 +65,46 @@ func (s *server) routes(router *mux.Router) {
 }
 
 func (s *server) HandleGetTodos(w http.ResponseWriter, r *http.Request) {
-	appData.mu.Lock()
-	defer appData.mu.Unlock()
-
-	todos := appData.todos
+	// First, we make our call to the database. If we get an error, we return and ISE
+	// (Internal Server Error -- 500). This is because the only error we should get
+	// is one where the database fails to perform the query. An empty result set is
+	// fine.
+	todos, err := s.db.GetTodos()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	// the `json.NewEncoder` needs a data type that satisfies the `io.Writer` interface,
+	// which the `http.ResponseWriter` hapens to do! Thus, to send JSON back in the response
+	// body, we create a new encoder using our response writer, and then encode the todos.
 	if err := json.NewEncoder(w).Encode(todos); err != nil {
+		// We return an ISE here because it means something went wrong with the encoding
+		// process, and is not a user error.
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
 func (s *server) HandleGetTodo(w http.ResponseWriter, r *http.Request) {
+	// `mux.Vars` extracts the identifiers found in the path (in this case the `id` in
+	// `/api/todos/{id}`.
 	vars := mux.Vars(r)
+	// Since the id is a string in the URL, we need to convert it to an int64 (since the
+	// todo model's ID field is an int64).
 	id, err := strconv.ParseInt(vars["id"], 10, 64)
+	if err != nil {
+		// We send a 400 here because realistically the only reason this would fail is
+		// because the user sent a non-integer value in the slug.
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	todo, err := s.db.GetTodo(id)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-
-	appData.mu.Lock()
-	defer appData.mu.Unlock()
-
-	var todo *models.Todo
-	for _, t := range appData.todos {
-		if t.ID == id {
-			todo = t
-		}
-	}
+	// We have to check for the condition where no todo was found. In that case it should
+	// be nil.
 	if todo == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -131,19 +116,23 @@ func (s *server) HandleGetTodo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) HandleCreateTodo(w http.ResponseWriter, r *http.Request) {
-	appData.mu.Lock()
-	defer appData.mu.Unlock()
-
+	// First, we decode the JSON into a Todo struct.
 	var todo models.Todo
 	if err := json.NewDecoder(r.Body).Decode(&todo); err != nil {
+		// While it's arguable that we should return an ISE in case some went wrong
+		// with the decoding, the likely reason why that would happen is because of
+		// bad JSON sent in the request body.
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	todo.ID = appData.nextID
-	appData.nextID += 1
-	appData.todos = append(appData.todos, &todo)
 
-	if err := json.NewEncoder(w).Encode(todo); err != nil {
+	todoWithID, err := s.db.CreateTodo(&todo)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(todoWithID); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
@@ -162,22 +151,16 @@ func (s *server) HandleUpdateTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appData.mu.Lock()
-	defer appData.mu.Unlock()
-
-	var todo *models.Todo
-	for _, t := range appData.todos {
-		if t.ID == id {
-			t.Completed = !t.Completed
-			todo = t
-		}
+	todo, err := s.db.UpdateTodo(&diff, id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if todo == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
-	updateTodo(todo, diff)
 	if err := json.NewEncoder(w).Encode(todo); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -191,24 +174,15 @@ func (s *server) HandleDeleteTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appData.mu.Lock()
-	defer appData.mu.Unlock()
-
-	var todo *models.Todo
-	var idx int
-
-	for i, t := range appData.todos {
-		if t.ID == id {
-			idx = i
-			todo = t
-		}
+	todo, err := s.db.DeleteTodo(id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if todo == nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-
-	appData.todos = append(appData.todos[:idx], appData.todos[idx+1:]...)
 
 	if err := json.NewEncoder(w).Encode(todo); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -223,15 +197,10 @@ func (s *server) HandleToggleTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appData.mu.Lock()
-	defer appData.mu.Unlock()
-
-	var todo *models.Todo
-	for _, t := range appData.todos {
-		if t.ID == id {
-			t.Completed = !t.Completed
-			todo = t
-		}
+	todo, err := s.db.ToggleTodo(id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 	if todo == nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -240,30 +209,5 @@ func (s *server) HandleToggleTodo(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewEncoder(w).Encode(todo); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-	}
-}
-
-//////////////////////////////////////////////////////////////////////////////////////////
-//// Helpers /////////////////////////////////////////////////////////////////////////////
-
-// updateTodo updates todo with the non-zero values in diff.
-//
-// NOTE: it assumes diff does not just replace with the same value. It also does not check
-// the completed or ID fields.
-func updateTodo(todo *models.Todo, diff models.Todo) {
-	if diff.Title != "" {
-		todo.Title = diff.Title
-	}
-	if diff.Day != "" {
-		todo.Day = diff.Day
-	}
-	if diff.Month != "" {
-		todo.Month = diff.Month
-	}
-	if diff.Year != "" {
-		todo.Year = diff.Year
-	}
-	if diff.Description != "" {
-		todo.Description = diff.Description
 	}
 }

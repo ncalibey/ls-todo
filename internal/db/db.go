@@ -11,8 +11,18 @@ import (
 
 // PGManager is used for interacting with the PostgreSQL database.
 type PGManager interface {
-	// GetTodos retrieves all todos from the database.
+	// GetTodos retrieves all todos.
 	GetTodos() ([]*models.Todo, error)
+	// GetTodo retrieves a single todo.
+	GetTodo(id int64) (*models.Todo, error)
+	// CreateTodo creates a new todo.
+	CreateTodo(todo *models.Todo) (*models.Todo, error)
+	// UpdateTodo update a given todo.
+	UpdateTodo(diff *models.Todo, id int64) (*models.Todo, error)
+	// DeleteTodo deletes a given todo.
+	DeleteTodo(id int64) (*models.Todo, error)
+	// ToggleTodo toggles the completed state of a given todo.
+	ToggleTodo(id int64) (*models.Todo, error)
 }
 
 // pgManager implements the PGManager interface for "production".
@@ -23,7 +33,7 @@ type pgManager struct {
 
 // New returns a new PGManager instance.
 func New(db *sqlx.DB) PGManager {
- return &pgManager{db}
+	return &pgManager{db}
 }
 
 func (m *pgManager) GetTodos() ([]*models.Todo, error) {
@@ -39,7 +49,7 @@ func (m *pgManager) GetTodos() ([]*models.Todo, error) {
 	defer tx.Rollback()
 
 	// Next, we query for all todos in the database.
-	rows, err := tx.Queryx("SELECT * FROM todos")
+	rows, err := tx.Queryx("SELECT * FROM todos ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +89,132 @@ func (m *pgManager) GetTodos() ([]*models.Todo, error) {
 	return todos, nil
 }
 
+func (m *pgManager) GetTodo(id int64) (*models.Todo, error) {
+	tx, err := m.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var todo models.Todo
+	// Here we use `QueryRowx` which can be used when we know there will only be one result.
+	// We then chain the StructScan call.
+	if err := tx.QueryRowx("SELECT * FROM todos WHERE id = $1", id).StructScan(&todo); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &todo, err
+}
+
+func (m *pgManager) CreateTodo(todo *models.Todo) (*models.Todo, error) {
+	tx, err := m.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var newTodo models.Todo
+	// Just like JS, we use "``" for templating strings.
+	if err := tx.QueryRowx(`
+        INSERT INTO todos (title, day, month, year, completed, description) VALUES
+			($1, $2, $3, $4, $5, $6) RETURNING *`,
+		todo.Title, todo.Day, todo.Month, todo.Year, todo.Completed, todo.Description,
+	).StructScan(&newTodo); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &newTodo, err
+}
+
+func (m *pgManager) UpdateTodo(diff *models.Todo, id int64) (*models.Todo, error) {
+	tx, err := m.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	todo := &models.Todo{}
+	// The following query uses two functions that you probably didn't encounter in the core
+	// curriculum: coalesce and nullif. The first takes any number of arguments and returns
+	// the first non-null one it finds (if they are all null then it returns null).
+	//
+	// The second one takes two arguments and returns null if they match. In our setup, if
+	// a user doesn't submit any value for any of the string fields, then the value on the
+	// `diff` model will be an empty string since that is the zero-value for the string type.
+	// Thus nullif will return false, and then the current value is what will be used in the
+	// database.
+	//
+	// This poses a problem when updating the completed field -- the zero-value for a bool is
+	// false, but we only want to update the field if the user explicitly includes it in the
+	// request body. There's a few ways we could handle this, but for now we'll just require
+	// users to use the ToggleTodo endpoint to change this value.
+	if err := tx.QueryRowx(`
+		UPDATE todos
+		   SET
+			   title       = coalesce(nullif($2, ''), title),
+			   day 	       = coalesce(nullif($3, ''), day),
+			   month       = coalesce(nullif($4, ''), month),
+			   year        = coalesce(nullif($5, ''), year),
+			   description = coalesce(nullif($6, ''), description)
+		 WHERE id = $1
+	 RETURNING *`,
+		id, diff.Title, diff.Day, diff.Month, diff.Year, diff.Description).StructScan(todo); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return todo, nil
+}
+
+func (m *pgManager) DeleteTodo(id int64) (*models.Todo, error) {
+	tx, err := m.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	todo := &models.Todo{}
+	if err := tx.QueryRowx("DELETE FROM todos WHERE id = $1 RETURNING *", id).StructScan(todo); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return todo, nil
+}
+
+func (m *pgManager) ToggleTodo(id int64) (*models.Todo, error) {
+	tx, err := m.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var completed bool
+	if err := tx.QueryRowx("SELECT completed FROM todos WHERE id = $1", id).Scan(&completed); err != nil {
+		return nil, err
+	}
+
+	todo := &models.Todo{}
+	if err := tx.QueryRowx("UPDATE todos SET completed = $1 WHERE id = $2 RETURNING *",
+		!completed, id).StructScan(todo); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return todo, nil
+}
 
 //////////////////////////////////////////////////////////////////////////////////////////
 //// Helpers /////////////////////////////////////////////////////////////////////////////
